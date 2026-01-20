@@ -1,0 +1,352 @@
+import { Sheet, SheetContent, SheetHeader, SheetTitle, SheetDescription } from "@/components/ui/sheet";
+import { Label } from "@/components/ui/label";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { useState, useEffect } from "react";
+import { User, Wallet, LogOut, Edit2, Loader2, Check, X, Sparkles } from "lucide-react";
+import { useDisconnect, useAccount, useWriteContract, useWaitForTransactionReceipt, useSwitchChain } from "wagmi";
+import { useNavigate } from "react-router-dom";
+import { usePrimeChatName } from "@/hooks/usePrimeChatName";
+import { NAME_REGISTRY_ADDRESS, NAME_REGISTRY_ABI, validateNameFormat, isReservedName, isNameTaken } from "@/lib/nameRegistry";
+import { base } from "viem/chains";
+import { toast } from "sonner";
+
+interface SettingsSheetProps {
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  address: string | undefined;
+}
+
+export const SettingsSheet = ({ open, onOpenChange, address }: SettingsSheetProps) => {
+  const { disconnect } = useDisconnect();
+  const { chainId } = useAccount();
+  const { switchChain } = useSwitchChain();
+  const navigate = useNavigate();
+  
+  const { name, hasRegisteredName, isLoading: isLoadingName, refresh, registerName, isRegistering } = usePrimeChatName();
+  
+  // Edit mode state
+  const [isEditing, setIsEditing] = useState(false);
+  const [isCreating, setIsCreating] = useState(false);
+  const [newUsername, setNewUsername] = useState("");
+  const [validationError, setValidationError] = useState<string | null>(null);
+  const [isCheckingName, setIsCheckingName] = useState(false);
+  
+  // Contract write for updateName
+  const { 
+    writeContract, 
+    data: txHash, 
+    isPending: isWritePending,
+    error: writeError,
+    reset: resetWrite
+  } = useWriteContract();
+  
+  const { 
+    isLoading: isTxLoading, 
+    isSuccess: isTxSuccess 
+  } = useWaitForTransactionReceipt({ hash: txHash });
+  
+  const isUpdating = isWritePending || isTxLoading;
+
+  const handleDisconnect = () => {
+    disconnect();
+    onOpenChange(false);
+    navigate("/welcome");
+  };
+  
+  // Start editing existing name
+  const handleStartEdit = () => {
+    setNewUsername(name || "");
+    setIsEditing(true);
+    setIsCreating(false);
+    setValidationError(null);
+    resetWrite();
+  };
+  
+  // Start creating new name
+  const handleStartCreate = () => {
+    setNewUsername("");
+    setIsCreating(true);
+    setIsEditing(false);
+    setValidationError(null);
+  };
+  
+  // Cancel editing/creating
+  const handleCancel = () => {
+    setIsEditing(false);
+    setIsCreating(false);
+    setNewUsername("");
+    setValidationError(null);
+  };
+  
+  // Validate and create new username
+  const handleCreateUsername = async () => {
+    if (!newUsername.trim()) {
+      setValidationError("Username cannot be empty");
+      return;
+    }
+    
+    // Check format
+    const formatCheck = validateNameFormat(newUsername);
+    if (!formatCheck.valid) {
+      setValidationError(formatCheck.error || "Invalid format");
+      return;
+    }
+    
+    // Check reserved
+    if (isReservedName(newUsername)) {
+      setValidationError("This name is reserved");
+      return;
+    }
+    
+    // Check availability on-chain
+    setIsCheckingName(true);
+    try {
+      const taken = await isNameTaken(newUsername);
+      if (taken) {
+        setValidationError("Username is already taken");
+        setIsCheckingName(false);
+        return;
+      }
+    } catch (error) {
+      console.error("Failed to check name:", error);
+      setValidationError("Failed to check availability");
+      setIsCheckingName(false);
+      return;
+    }
+    setIsCheckingName(false);
+    
+    // Register the name
+    await registerName(newUsername);
+  };
+  
+  // Validate and update existing username
+  const handleUpdateUsername = async () => {
+    if (!newUsername.trim()) {
+      setValidationError("Username cannot be empty");
+      return;
+    }
+    
+    // Check format
+    const formatCheck = validateNameFormat(newUsername);
+    if (!formatCheck.valid) {
+      setValidationError(formatCheck.error || "Invalid format");
+      return;
+    }
+    
+    // Check reserved
+    if (isReservedName(newUsername)) {
+      setValidationError("This name is reserved");
+      return;
+    }
+    
+    // Check if same as current
+    if (newUsername.toLowerCase() === name?.toLowerCase()) {
+      setValidationError("This is your current username");
+      return;
+    }
+    
+    // Check availability on-chain
+    setIsCheckingName(true);
+    try {
+      const taken = await isNameTaken(newUsername);
+      if (taken) {
+        setValidationError("Username is already taken");
+        setIsCheckingName(false);
+        return;
+      }
+    } catch (error) {
+      console.error("Failed to check name:", error);
+      setValidationError("Failed to check availability");
+      setIsCheckingName(false);
+      return;
+    }
+    setIsCheckingName(false);
+    
+    // Ensure on Base network
+    if (chainId !== base.id) {
+      try {
+        await switchChain({ chainId: base.id });
+      } catch {
+        setValidationError("Please switch to Base network");
+        return;
+      }
+    }
+    
+    // Call updateName contract function
+    try {
+      writeContract({
+        address: NAME_REGISTRY_ADDRESS,
+        abi: NAME_REGISTRY_ABI,
+        functionName: 'updateName',
+        args: [newUsername.toLowerCase()],
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      } as any);
+    } catch (err) {
+      console.error("Failed to update name:", err);
+      setValidationError("Failed to submit transaction");
+    }
+  };
+  
+  // Handle update success
+  useEffect(() => {
+    if (isTxSuccess) {
+      toast.success("Username updated successfully!");
+      setIsEditing(false);
+      setNewUsername("");
+      refresh();
+    }
+  }, [isTxSuccess, refresh]);
+  
+  // Handle create success - check if name was just registered
+  useEffect(() => {
+    if (hasRegisteredName && isCreating) {
+      toast.success("Username created successfully!");
+      setIsCreating(false);
+      setNewUsername("");
+    }
+  }, [hasRegisteredName, isCreating]);
+  
+  // Handle error
+  useEffect(() => {
+    if (writeError) {
+      if (writeError.message?.includes("user rejected")) {
+        setValidationError("Transaction rejected");
+      } else {
+        setValidationError("Failed to update username");
+      }
+    }
+  }, [writeError]);
+
+  return (
+    <Sheet open={open} onOpenChange={onOpenChange}>
+      <SheetContent>
+        <SheetHeader>
+          <SheetTitle>Settings</SheetTitle>
+          <SheetDescription>
+            Customize your profile and preferences
+          </SheetDescription>
+        </SheetHeader>
+
+        <div className="mt-6 space-y-6">
+          {/* Wallet Address */}
+          <div className="space-y-2">
+            <Label className="text-sm text-muted-foreground flex items-center gap-2">
+              <Wallet className="h-4 w-4" />
+              Connected Wallet
+            </Label>
+            <p className="text-sm font-mono bg-secondary/50 p-3 rounded-lg break-all">
+              {address}
+            </p>
+          </div>
+
+          {/* PrimeChat Username */}
+          <div className="space-y-3">
+            <Label className="text-sm text-muted-foreground flex items-center gap-2">
+              <User className="h-4 w-4" />
+              PrimeChat Username
+            </Label>
+            
+            {isLoadingName ? (
+              <div className="p-3 bg-secondary/50 rounded-lg flex items-center gap-2">
+                <Loader2 className="h-4 w-4 animate-spin" />
+                <span className="text-muted-foreground">Loading...</span>
+              </div>
+            ) : isEditing || isCreating ? (
+              <div className="space-y-2">
+                <div className="flex gap-2">
+                  <Input
+                    value={newUsername}
+                    onChange={(e) => {
+                      setNewUsername(e.target.value.toLowerCase().replace(/[^a-z0-9_]/g, ''));
+                      setValidationError(null);
+                    }}
+                    placeholder="Enter username"
+                    disabled={isUpdating || isCheckingName || isRegistering}
+                    className="flex-1"
+                    maxLength={32}
+                  />
+                  <Button
+                    size="icon"
+                    variant="ghost"
+                    onClick={isCreating ? handleCreateUsername : handleUpdateUsername}
+                    disabled={isUpdating || isCheckingName || isRegistering || !newUsername.trim()}
+                    className="shrink-0"
+                  >
+                    {isUpdating || isCheckingName || isRegistering ? (
+                      <Loader2 className="h-4 w-4 animate-spin" />
+                    ) : (
+                      <Check className="h-4 w-4 text-green-500" />
+                    )}
+                  </Button>
+                  <Button
+                    size="icon"
+                    variant="ghost"
+                    onClick={handleCancel}
+                    disabled={isUpdating || isRegistering}
+                    className="shrink-0"
+                  >
+                    <X className="h-4 w-4" />
+                  </Button>
+                </div>
+                {validationError && (
+                  <p className="text-xs text-destructive">{validationError}</p>
+                )}
+                <p className="text-xs text-muted-foreground">
+                  3-32 characters, letters, numbers, and underscores only. Gas cost: ~$0.001-0.01 on Base.
+                </p>
+              </div>
+            ) : (
+              <div className="p-3 bg-secondary/50 rounded-lg flex items-center justify-between">
+                {hasRegisteredName && name ? (
+                  <>
+                    <span className="font-semibold">{name}</span>
+                    <Button
+                      size="icon"
+                      variant="ghost"
+                      className="h-8 w-8"
+                      onClick={handleStartEdit}
+                    >
+                      <Edit2 className="h-4 w-4" />
+                    </Button>
+                  </>
+                ) : (
+                  <>
+                    <span className="text-muted-foreground italic">No username set</span>
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      className="gap-1"
+                      onClick={handleStartCreate}
+                    >
+                      <Sparkles className="h-3 w-3" />
+                      Create
+                    </Button>
+                  </>
+                )}
+              </div>
+            )}
+            
+            {!hasRegisteredName && !isCreating && (
+              <p className="text-xs text-muted-foreground">
+                Create a username to be easily found by others. Optional - you can use your wallet address until you're ready.
+              </p>
+            )}
+          </div>
+
+          {/* Disconnect Button */}
+          <div className="pt-4 border-t border-border">
+            <Button 
+              variant="destructive" 
+              className="w-full gap-2"
+              onClick={handleDisconnect}
+            >
+              <LogOut className="h-4 w-4" />
+              Disconnect
+            </Button>
+          </div>
+        </div>
+      </SheetContent>
+    </Sheet>
+  );
+};
