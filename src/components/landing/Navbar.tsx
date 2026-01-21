@@ -11,8 +11,6 @@ const Navbar = () => {
 
   const navLinks = [
     { to: "#", label: "Platform" },
-    { to: "#", label: "Use Cases" },
-    { to: "#", label: "Learn" },
   ];
 
   return (
